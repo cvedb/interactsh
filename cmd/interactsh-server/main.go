@@ -43,7 +43,7 @@ func main() {
 	flagSet.SetDescription(`Interactsh server - Go client to configure and host interactsh server.`)
 
 	flagSet.CreateGroup("input", "Input",
-		flagSet.StringSliceVarP(&cliOptions.Domains, "domain", "d", []string{}, "single/multiple configured domain to use for server", goflags.CommaSeparatedStringSliceOptions),
+		flagSet.StringSliceVarP(&cliOptions.Domains, "domain", "d", nil, "single/multiple configured domain to use for server", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVar(&cliOptions.IPAddress, "ip", "", "public ip address to use for interactsh server"),
 		flagSet.StringVarP(&cliOptions.ListenIP, "listen-ip", "lip", "0.0.0.0", "public ip address to listen on"),
 		flagSet.IntVarP(&cliOptions.Eviction, "eviction", "e", 30, "number of days to persist interaction data in memory"),
@@ -169,6 +169,13 @@ func main() {
 	for _, domain := range cliOptions.Domains {
 		hostmaster := fmt.Sprintf("admin@%s", domain)
 		cliOptions.Hostmasters = append(cliOptions.Hostmasters, hostmaster)
+	}
+
+	// if any file from js-chain/url-collect list was specified enables js endpoint
+	shouldEnableJS := len(cliOptions.JsChainLoad) > 0 || len(cliOptions.JsCollectPageList) > 0
+	if shouldEnableJS {
+		gologger.Info().Msgf("some js/url were specified, automatically enabling js injection at %s\n", server.JsEndpoint)
+		cliOptions.JsResp = true
 	}
 
 	serverOptions := cliOptions.AsServerOptions()

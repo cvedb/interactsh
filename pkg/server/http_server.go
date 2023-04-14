@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -19,6 +20,12 @@ import (
 	jsoniter "github.com/json-iterator/go"
 	"github.com/projectdiscovery/gologger"
 	stringsutil "github.com/projectdiscovery/utils/strings"
+)
+
+const (
+	JsEndpoint           = "/js"
+	JsCallbackEndpoint   = "/js_callback"
+	PageCallbackEndpoint = "/page_callback"
 )
 
 // HTTPServer is a http server instance that listens both
@@ -56,7 +63,7 @@ func NewHTTPServer(options *Options) (*HTTPServer, error) {
 	// If a static directory is specified, also serve it.
 	if options.HTTPDirectory != "" {
 		abs, _ := filepath.Abs(options.HTTPDirectory)
-		gologger.Info().Msgf("Loading directory (%s) to serve from : %s/s/", abs, strings.Join(options.Domains, ","))
+		gologger.Info().Msgf("Loading directory (%s) to serve from : %s/s/", abs, server.getFqdn(nil))
 		server.staticHandler = http.StripPrefix("/s/", disableDirectoryListing(http.FileServer(http.Dir(options.HTTPDirectory))))
 	}
 	// If custom index, read the custom index file and serve it.
@@ -70,6 +77,12 @@ func NewHTTPServer(options *Options) (*HTTPServer, error) {
 	}
 	router := &http.ServeMux{}
 	router.Handle("/", server.logger(http.HandlerFunc(server.defaultHandler)))
+	if options.JsResp {
+		gologger.Info().Msgf(`Serving js injection at '%s'`, JsEndpoint)
+		router.Handle(JsEndpoint, server.logger(http.HandlerFunc(server.jsHandler)))
+		router.Handle(JsCallbackEndpoint, server.logger(http.HandlerFunc(server.jsCallbackHandler)))
+		router.Handle(PageCallbackEndpoint, server.logger(http.HandlerFunc(server.jsCallbackHandler)))
+	}
 	router.Handle("/register", server.corsMiddleware(server.authMiddleware(http.HandlerFunc(server.registerHandler))))
 	router.Handle("/deregister", server.corsMiddleware(server.authMiddleware(http.HandlerFunc(server.deregisterHandler))))
 	router.Handle("/poll", server.corsMiddleware(server.authMiddleware(http.HandlerFunc(server.pollHandler))))
@@ -475,4 +488,67 @@ func (h *HTTPServer) metricsHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_ = jsoniter.NewEncoder(w).Encode(interactMetrics)
+}
+
+func (h *HTTPServer) getFqdn(req *http.Request) string {
+	// todo: use first domain as default (should be extracted from certificate)
+	if len(h.options.Domains) > 0 {
+		// attempts to extract the domain name from host header
+		for _, configuredDomain := range h.options.Domains {
+			if req != nil && stringsutil.HasSuffixI(req.Host, configuredDomain) {
+				return configuredDomain
+			}
+		}
+		// fallback to first domain in case of unknown host header
+		return h.options.Domains[0]
+	}
+	return ""
+}
+
+// jsHandler is a handler for /js endpoint
+func (h *HTTPServer) jsHandler(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'none'")
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Requested-With")
+	w.Header().Set("Access-Control-Max-Age", "86400")
+
+	callbackURL := h.getJsCallbackURL(req)
+	jsChain, _ := json.Marshal(h.options.JsChainLoad)
+	collectPageList, _ := json.Marshal(h.options.JsCollectPageList)
+	jsData := strings.NewReplacer(
+		"[HOST_URL]", callbackURL,
+		"[CHAINLOAD_REPLACE_ME]", string(jsChain),
+		"[COLLECT_PAGE_LIST_REPLACE_ME]", string(collectPageList),
+	).Replace(jsProbe)
+
+	_, _ = w.Write([]byte(jsData))
+}
+
+// jsCallbackHandler is a handler for /js_callback and /page_callback endpoints
+func (h *HTTPServer) getJsCallbackURL(req *http.Request) string {
+	var scheme string
+	if h.options.HttpsPort > 0 && req.TLS != nil {
+		scheme = "https"
+	} else {
+		scheme = "http"
+	}
+
+	// override with request if provided
+	if req != nil && req.URL.Scheme != "" {
+		scheme = req.URL.Scheme
+	}
+
+	// infer the callback from host header
+	callbackHost := req.Host
+
+	return fmt.Sprintf("%s://%s", scheme, callbackHost)
+}
+
+// jsCallbackHandler is a handler for /js_callback and /page_callback endpoints
+func (h *HTTPServer) jsCallbackHandler(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "X-Requested-With")
 }
